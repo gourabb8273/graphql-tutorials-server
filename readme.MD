@@ -10,8 +10,8 @@ query GetAllTodos($getUserId: ID!) {
       phone
     }
   }
-  # getUser(id: $getUserId){
-  #   name
-  #   email
-  # }
+  getUser(id: $getUserId){
+     name
+     email
+   }
 }
