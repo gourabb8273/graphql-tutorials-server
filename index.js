@@ -1,12 +1,18 @@
-const express = require("express");
-const { ApolloServer } = require("@apollo/server");
-const { expressMiddleware } = require("@as-integrations/express5");
-const axios = require("axios");
-const cors = require("cors");
+import express from "express";
+import http from "http";
+import { ApolloServer } from "@apollo/server";
+import { expressMiddleware } from "@as-integrations/express5";
+import axios from "axios";
+import cors from "cors";
 
-/* ----------------------------------
-   Type Definitions
----------------------------------- */
+// websocket import
+import { WebSocketServer } from "ws";
+import { useServer } from "graphql-ws/lib/use/ws";
+import { makeExecutableSchema } from "@graphql-tools/schema";
+
+/* ------------------------------
+   Schema & Type Definitions
+-------------------------------- */
 const typeDefs = `
   type User {
     id: ID!
@@ -28,76 +34,117 @@ const typeDefs = `
     getAllUsers: [User!]!
     getUser(id: ID!): User
   }
+
+  type Subscription {
+    todoAdded: Todo
+  }
 `;
 
-/* ----------------------------------
-    Helper Functions
----------------------------------- */
 const fetchTodos = async () => {
-  try {
-    const { data } = await axios.get("https://jsonplaceholder.typicode.com/todos?_limit=10");
-    return data;
-  } catch (error) {
-    console.error("Error fetching todos:", error);
-    return [];
-  }
+  const { data } = await axios.get("https://jsonplaceholder.typicode.com/todos?_limit=10");
+  return data;
 };
 
 const fetchUsers = async () => {
-  try {
-    const { data } = await axios.get("https://jsonplaceholder.typicode.com/users");
-    return data;
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    return [];
-  }
+  const { data } = await axios.get("https://jsonplaceholder.typicode.com/users");
+  return data;
 };
 
 const fetchUserById = async (id) => {
-  try {
-    const { data } = await axios.get(`https://jsonplaceholder.typicode.com/users/${id}`);
-    return data;
-  } catch (error) {
-    console.error("Error fetching user:", error);
-    return null;
-  }
+  if (!id) return null;
+  const { data } = await axios.get(`https://jsonplaceholder.typicode.com/users/${id}`);
+  return data;
 };
 
-/* ----------------------------------
-   Resolvers
----------------------------------- */
 const resolvers = {
   Todo: {
-    user: (todo) => fetchUserById(todo.userId),
+      user: (todo) => {
+      // If user already exists (like in subscription), return it directly
+      if (todo.user) return todo.user;
+      if (todo.userId) return fetchUserById(todo.userId);
+      return null;
+    },
   },
   Query: {
     getTodos: () => fetchTodos(),
     getAllUsers: () => fetchUsers(),
     getUser: (_, { id }) => fetchUserById(id),
   },
+  Subscription: {
+    todoAdded: {
+      subscribe: async function* () {
+        while (true) {
+          await new Promise((r) => setTimeout(r, 5000));
+          yield {
+            todoAdded: {
+              id: String(Math.floor(Math.random() * 10000)),
+              title: "New Todo from Subscription",
+              completed: false,
+              user: {
+                userId: String(Math.floor(Math.random() * 10000)),
+                name: "John Doe",
+                email: "john@example.com",
+                phone: "1234567890",
+                website: "example.com",
+              },
+            },
+          };
+        }
+      },
+    },
+  },
 };
 
-/* ----------------------------------
-    Start Apollo + Express Server
----------------------------------- */
+/* ------------------------------
+   Apollo + WebSocket Server
+-------------------------------- */
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
 
-  const server = new ApolloServer({
-    typeDefs,
-    resolvers,
+  // WebSocket setup for subscriptions
+  const wsServer = new WebSocketServer({ server: httpServer, path: "/graphql" });
+  const serverCleanup = useServer({ schema }, wsServer);
+
+  const apolloServer = new ApolloServer({
+    schema,
+    plugins: [
+      {
+        async serverWillStart() {
+          return {
+            async drainServer() {
+              await serverCleanup.dispose();
+            },
+          };
+        },
+      },
+    ],
   });
 
-  await server.start();
+  await apolloServer.start();
 
-  app.use(cors());
-  app.use(express.json());
-  app.use("/graphql", expressMiddleware(server));
+  app.use(cors(), express.json(), expressMiddleware(apolloServer));
 
   const PORT = 4000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server ready at http://localhost:${PORT}/graphql`);
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 GraphQL endpoint ready at http://localhost:${PORT}/graphql`);
+    console.log(`🔄 Subscriptions ready at ws://localhost:${PORT}/graphql`);
   });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log("\n🛑 Shutting down gracefully...");
+    await apolloServer.stop();
+    wsServer.close(() => console.log("✅ WebSocket server closed"));
+    httpServer.close(() => {
+      console.log("✅ HTTP server closed");
+      process.exit(0);
+    });
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 startServer();
